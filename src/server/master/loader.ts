@@ -80,12 +80,27 @@ function recursivelyRemoveUnreferencedBindings(path: NodePath<t.Program>): void 
     return Object.values(path.scope.bindings).filter(
       (binding) =>
         !binding.referenced ||
-        binding.referencePaths.every((refPath) => refPath.find((x) => x.node == binding.path.node)),
+        binding.referencePaths.every(
+          (refPath) =>
+            refPath.find((x) => x.node == binding.path.node) ||
+            // NOTE Find `FunctionComponent.prop = ...` expressions
+            // TODO list of func component props
+            // NOTE (!!!) dangerous transformation
+            (refPath.parentPath.isMemberExpression() && refPath.scope.block == path.node),
+        ),
     );
   };
   let bindings = getUnreferencedBindings();
   do {
-    bindings.forEach((binding) => binding.path.remove());
+    bindings.forEach((binding) => {
+      binding.referencePaths.forEach(
+        (refPath) =>
+          refPath.parentPath.isMemberExpression() &&
+          refPath.scope.block == path.node &&
+          refPath.findParent((parentPath) => !parentPath.isMemberExpression()).remove(),
+      );
+      binding.path.remove();
+    });
   } while ((bindings = getUnreferencedBindings()).length > 0);
 }
 
@@ -101,6 +116,13 @@ function minifyStories(ast: t.File, source: string): string {
       isTransformed = true;
       getPropertyPath(kindPath, 'component')?.remove();
       getPropertyPath(kindPath, 'decorators')?.remove();
+      const parametersPath = getPropertyPath(kindPath, 'parameters')?.get('value');
+      // TODO Tests
+      if (parametersPath?.isObjectExpression()) {
+        // TODO define list of excluded props
+        getPropertyPath(parametersPath, 'component')?.remove();
+        getPropertyPath(parametersPath, 'subcomponents')?.remove();
+      }
       defaultPath.parentPath.traverse({
         ExportNamedDeclaration(namedPath) {
           const { declaration: namedDeclaration } = namedPath.node;
@@ -113,6 +135,22 @@ function minifyStories(ast: t.File, source: string): string {
       });
     },
     CallExpression(path) {
+      // TODO Tests
+      if (path.get('callee').isIdentifier({ name: 'addDecorator' })) {
+        isTransformed = true;
+        path.remove();
+        return;
+      }
+      // TODO Tests
+      if (path.get('callee').isIdentifier({ name: 'addParameters' })) {
+        const [argPath] = path.get('arguments');
+        if (!argPath || !argPath.isObjectExpression()) return;
+        isTransformed = true;
+        (argPath.get('properties') as NodePath[])
+          .filter((propPath) => !propPath.isObjectProperty() || !t.isIdentifier(propPath.node.key, { name: 'creevey' }))
+          .forEach((propPath) => propPath.remove());
+        return;
+      }
       if (!path.get('callee').isIdentifier({ name: 'storiesOf' }) || visited.has(path)) return;
       isTransformed = true;
       visited.add(path);
